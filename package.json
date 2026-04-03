@@ -1,0 +1,53 @@
+{
+  "name": "pretext-pdfjs",
+  "version": "0.1.0",
+  "description": "Fuses PDF.js rendering with @chenglou/pretext text layout — responsive reflow, pixel-accurate text layers, smart annotations, and character-level search highlighting for PDFs on canvas",
+  "type": "module",
+  "main": "dist/cjs/index.cjs",
+  "module": "dist/esm/index.js",
+  "types": "dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.cjs",
+      "types": "./dist/esm/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "rollup -c",
+    "dev": "rollup -c -w",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "pdfjs-dist": ">=4.0.0",
+    "@chenglou/pretext": ">=0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "rollup": "^4.0.0",
+    "@rollup/plugin-typescript": "^11.0.0",
+    "tslib": "^2.6.0",
+    "pdfjs-dist": "^4.0.0",
+    "@chenglou/pretext": "latest"
+  },
+  "keywords": [
+    "pdf",
+    "pdfjs",
+    "pretext",
+    "canvas",
+    "text-rendering",
+    "text-layout",
+    "reflow",
+    "text-layer"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alpeshvas/pretext-skill.git"
+  }
+}
