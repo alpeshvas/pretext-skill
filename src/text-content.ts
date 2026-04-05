@@ -190,8 +190,11 @@ export function groupIntoParagraphs(
   const columnedItems: typeof itemsWithColumn = []
 
   if (layout.columnCount > 1) {
+    // Find where column content begins
+    const columnStartY = findColumnStartY(items, layout)
+
     for (const entry of itemsWithColumn) {
-      if (isFullWidthItem(entry.item, layout)) {
+      if (isFullWidthItem(entry.item, layout, columnStartY)) {
         fullWidthItems.push(entry)
       } else {
         columnedItems.push(entry)
@@ -246,23 +249,61 @@ function assignColumn(item: TextItem, layout: PageLayout): number {
   return best
 }
 
-/** Check if an item spans the full page width (title, authors) */
-function isFullWidthItem(item: TextItem, layout: PageLayout): boolean {
+/**
+ * Check if an item is above the column content region (full-width header).
+ *
+ * Strategy: find the Y coordinate where column content begins (the highest
+ * Y that has items in BOTH columns), and treat everything above as full-width.
+ * This correctly captures title, authors, abstract, and any other header
+ * content regardless of whether it's centered or left-aligned.
+ */
+function isFullWidthItem(
+  item: TextItem,
+  layout: PageLayout,
+  columnStartY?: number,
+): boolean {
   if (layout.columnCount <= 1) return false
+  if (columnStartY === undefined) return false
 
-  const x = item.transform[4]
-  const pageCenter = layout.pageWidth / 2
-  const itemCenter = x + (item.width / 2)
+  // Item is above where columns start → full-width
+  return item.transform[5] > columnStartY
+}
 
-  // Full-width if: centered on page AND wider than a single column,
-  // OR positioned in the "gutter" area between columns
-  const colWidth = layout.columns[0].right - layout.columns[0].left
-  const isCentered = Math.abs(itemCenter - pageCenter) < layout.pageWidth * 0.15
+/**
+ * Find the Y coordinate where multi-column content begins.
+ * This is the highest Y where items appear in more than one column.
+ */
+function findColumnStartY(
+  items: TextItem[],
+  layout: PageLayout,
+): number | undefined {
+  if (layout.columnCount <= 1) return undefined
 
-  // Also check Y: full-width items are typically in the top portion
-  const isTopArea = item.transform[5] > layout.pageWidth * 0.6 // rough heuristic
+  // Group items by approximate Y line (within 3pt tolerance)
+  const lines = new Map<number, Set<number>>()
 
-  return isCentered && isTopArea
+  for (const item of items) {
+    const y = Math.round(item.transform[5] / 3) * 3 // bin to 3pt
+    const col = assignColumn(item, layout)
+
+    let cols = lines.get(y)
+    if (!cols) {
+      cols = new Set()
+      lines.set(y, cols)
+    }
+    cols.add(col)
+  }
+
+  // Find the highest Y where multiple columns have content
+  let maxY = -Infinity
+  for (const [y, cols] of lines) {
+    if (cols.size >= 2 && y > maxY) {
+      maxY = y
+    }
+  }
+
+  // Add a small margin above the first multi-column line
+  return maxY !== -Infinity ? maxY + 5 : undefined
 }
 
 /** Sort items in natural reading order (top-to-bottom, left-to-right) */
