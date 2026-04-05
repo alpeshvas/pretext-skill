@@ -1,31 +1,38 @@
-import { prepareWithSegments, layoutWithLines } from '@chenglou/pretext'
+import { prepare, layout } from '@chenglou/pretext'
 import type {
   PreparedTextContent,
   SearchHit,
   SearchHitRect,
   SearchOptions,
+  TextItem,
 } from './types'
+import { fontSizeFromTransform } from './utils'
 
 /**
- * Character-level search with pixel-accurate highlight rectangles.
+ * Character-level search with highlight rectangles in original PDF coordinates.
  *
- * Uses pretext's layout engine to compute exact positions for each match,
- * enabling highlight rects that align perfectly with canvas-rendered text.
+ * Search operates on the extracted text but highlights are computed from
+ * the original PDF text item positions — so they overlay correctly on
+ * the PDF canvas, exactly where it was written.
  */
 export class PretextSearch {
   /**
-   * Search within a page's prepared text content.
-   * Returns matches with character positions (rects computed separately).
+   * Search within a page's text and return matches with highlight rects
+   * positioned in the original PDF coordinate space (matching the canvas).
    */
   static searchPage(
     textContent: PreparedTextContent,
     query: string,
     pageNum: number,
+    viewportHeight: number,
+    scale: number,
     options: SearchOptions = {},
   ): SearchHit[] {
     if (!query) return []
 
-    const text = textContent.fullText
+    // Build a flat string from items preserving item boundaries
+    const { text, itemMap } = buildSearchableText(textContent.items)
+
     const searchText = options.caseSensitive ? text : text.toLowerCase()
     const searchQuery = options.caseSensitive ? query : query.toLowerCase()
 
@@ -39,7 +46,6 @@ export class PretextSearch {
 
       const matchText = text.substring(idx, idx + query.length)
 
-      // Check whole word boundary if requested
       if (options.wholeWord) {
         const before = idx > 0 ? text[idx - 1] : ' '
         const after = idx + query.length < text.length ? text[idx + query.length] : ' '
@@ -49,11 +55,22 @@ export class PretextSearch {
         }
       }
 
+      // Compute highlight rects from original PDF item positions
+      const rects = computeRectsFromItems(
+        idx,
+        idx + query.length,
+        itemMap,
+        textContent.items,
+        textContent.fontMap,
+        viewportHeight,
+        scale,
+      )
+
       hits.push({
         pageNum,
         matchIndex: matchIndex++,
         text: matchText,
-        rects: [], // Computed by computeHighlightRects
+        rects,
       })
 
       startIdx = idx + 1
@@ -61,100 +78,132 @@ export class PretextSearch {
 
     return hits
   }
+}
 
-  /**
-   * Compute pixel-accurate highlight rectangles for search hits.
-   *
-   * Uses pretext layoutWithLines to find which lines contain the match,
-   * then canvas measureText to compute exact x-positions within each line.
-   */
-  static computeHighlightRects(
-    textContent: PreparedTextContent,
-    query: string,
-    maxWidth: number,
-    lineHeight: number,
-    scale: number,
-    options: SearchOptions = {},
-  ): SearchHitRect[][] {
-    const text = textContent.fullText
-    const font = textContent.paragraphs[0]?.font ?? '16px sans-serif'
+// ── Internal: Searchable text with item position tracking ─────
 
-    // Layout the full text to get line positions
-    const prepared = prepareWithSegments(text, font)
-    const { lines } = layoutWithLines(prepared, maxWidth, lineHeight)
+interface ItemRange {
+  /** Index into items array */
+  itemIndex: number
+  /** Start position in the flat searchable string */
+  textStart: number
+  /** End position in the flat searchable string */
+  textEnd: number
+}
 
-    // Build a character-to-line index
-    const charToLine: number[] = new Array(text.length)
-    let charOffset = 0
-    for (let li = 0; li < lines.length; li++) {
-      const lineText = lines[li].text
-      for (let ci = 0; ci < lineText.length; ci++) {
-        charToLine[charOffset + ci] = li
-      }
-      charOffset += lineText.length
-      // Account for line break character
-      if (charOffset < text.length) {
-        charToLine[charOffset] = li
-        charOffset++
+/**
+ * Build a single searchable string from all text items,
+ * tracking which character ranges map to which items.
+ */
+function buildSearchableText(items: TextItem[]): {
+  text: string
+  itemMap: ItemRange[]
+} {
+  const parts: string[] = []
+  const itemMap: ItemRange[] = []
+  let offset = 0
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]
+    const str = item.str
+
+    if (i > 0) {
+      // Add space between items unless they're on different lines
+      // (PDF.js already handles word spacing within items)
+      const prevY = items[i - 1].transform[5]
+      const currY = item.transform[5]
+      const sameLine = Math.abs(prevY - currY) < 2
+
+      if (sameLine) {
+        parts.push(' ')
+        offset += 1
+      } else {
+        parts.push('\n')
+        offset += 1
       }
     }
 
-    // Find all matches and compute rects
-    const searchText = options.caseSensitive ? text : text.toLowerCase()
-    const searchQuery = options.caseSensitive ? query : query.toLowerCase()
-    const allRects: SearchHitRect[][] = []
+    itemMap.push({
+      itemIndex: i,
+      textStart: offset,
+      textEnd: offset + str.length,
+    })
 
-    let startIdx = 0
-    while (true) {
-      const idx = searchText.indexOf(searchQuery, startIdx)
-      if (idx === -1) break
-
-      const endIdx = idx + query.length - 1
-      const startLine = charToLine[idx] ?? 0
-      const endLine = charToLine[endIdx] ?? startLine
-
-      const rects: SearchHitRect[] = []
-
-      for (let li = startLine; li <= endLine; li++) {
-        const line = lines[li]
-        if (!line) continue
-
-        // Compute x-start and x-end within this line
-        // Find the character offsets relative to line start
-        let lineStartChar = 0
-        let tmp = 0
-        for (let i = 0; i < li; i++) {
-          tmp += lines[i].text.length + 1 // +1 for line break
-        }
-        lineStartChar = tmp
-
-        const matchStartInLine = Math.max(0, idx - lineStartChar)
-        const matchEndInLine = Math.min(line.text.length, endIdx - lineStartChar + 1)
-
-        if (matchStartInLine >= matchEndInLine) continue
-
-        // Use pretext line width ratios for x-position estimation
-        const fullWidth = line.width
-        const beforeText = line.text.substring(0, matchStartInLine)
-        const matchText = line.text.substring(matchStartInLine, matchEndInLine)
-
-        // Estimate x positions proportionally
-        const beforeRatio = beforeText.length / (line.text.length || 1)
-        const matchRatio = matchText.length / (line.text.length || 1)
-
-        rects.push({
-          x: beforeRatio * fullWidth * scale,
-          y: li * lineHeight * scale,
-          width: matchRatio * fullWidth * scale,
-          height: lineHeight * scale,
-          lineIndex: li,
-        })
-      }
-
-      allRects.push(rects)
-      startIdx = idx + 1
-    }
-
-    return allRects
+    parts.push(str)
+    offset += str.length
   }
+
+  return { text: parts.join(''), itemMap }
+}
+
+/**
+ * Given a match range in the flat search string, compute highlight
+ * rectangles using the original PDF text item transforms.
+ *
+ * Each item the match spans gets its own rect, positioned exactly
+ * where the PDF rendered that text on the canvas.
+ */
+function computeRectsFromItems(
+  matchStart: number,
+  matchEnd: number,
+  itemMap: ItemRange[],
+  items: TextItem[],
+  fontMap: Map<string, string>,
+  viewportHeight: number,
+  scale: number,
+): SearchHitRect[] {
+  const rects: SearchHitRect[] = []
+
+  for (const range of itemMap) {
+    // Does this item overlap with the match?
+    if (range.textEnd <= matchStart || range.textStart >= matchEnd) continue
+
+    const item = items[range.itemIndex]
+    const fontSize = fontSizeFromTransform(item.transform) * scale
+
+    // Character offsets within this item's text
+    const charStart = Math.max(0, matchStart - range.textStart)
+    const charEnd = Math.min(item.str.length, matchEnd - range.textStart)
+    const matchStr = item.str.substring(charStart, charEnd)
+
+    // Use pretext to measure exact character positions within the item
+    const fontFamily = fontMap.get(item.fontName) ?? 'sans-serif'
+    const fontStr = `${fontSize}px ${fontFamily}`
+
+    let xOffset = 0
+    let matchWidth = item.width * scale * (matchStr.length / (item.str.length || 1))
+
+    try {
+      // Measure text before match start for x-offset
+      if (charStart > 0) {
+        const beforeText = item.str.substring(0, charStart)
+        const beforePrepared = prepare(beforeText, fontStr)
+        const beforeLayout = layout(beforePrepared, Infinity, fontSize * 1.2)
+        // Use width from the item proportionally
+        xOffset = (charStart / item.str.length) * item.width * scale
+      }
+
+      // Measure match text width
+      const matchPrepared = prepare(matchStr, fontStr)
+      const matchLayout = layout(matchPrepared, Infinity, fontSize * 1.2)
+      // Proportional width from the original item
+      matchWidth = (matchStr.length / (item.str.length || 1)) * item.width * scale
+    } catch {
+      // Fallback: proportional width estimation
+    }
+
+    // Position from original PDF transform
+    const x = item.transform[4] * scale + xOffset
+    const y = viewportHeight - item.transform[5] * scale - fontSize
+
+    rects.push({
+      x,
+      y,
+      width: matchWidth,
+      height: fontSize * 1.2,
+      lineIndex: -1, // Original coordinates, not line-based
+    })
+  }
+
+  return rects
 }

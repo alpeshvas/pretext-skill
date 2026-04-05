@@ -7,6 +7,7 @@ import type { LoadOptions } from './types'
 
 export { PretextDocument } from './document'
 export { PretextPage } from './page'
+export type { RenderResult } from './page'
 export { PretextTextLayer } from './text-layer'
 export { PretextSearch } from './search'
 export { FontMapper } from './font-map'

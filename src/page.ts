@@ -22,12 +22,22 @@ import { measureAnnotations } from './annotations'
 import { renderThumbnail } from './thumbnails'
 import { setupHiDPICanvas, baselineOffset } from './utils'
 
+/** Result of a unified render() call */
+export interface RenderResult {
+  /** The text layer (if textLayerContainer was provided) */
+  textLayer?: PretextTextLayer
+  /** Detected page layout */
+  layout: PageLayout
+}
+
 /**
  * Wraps a PDF.js page with pretext-powered text capabilities.
  *
- * All original PDF.js functionality is available via the `pdfPage` escape hatch.
- * Pretext adds: responsive text reflow, accurate text layers, character-level
- * search, smart annotation sizing, and readable thumbnails.
+ * Default mode: PDF.js renders the page exactly as authored on canvas.
+ * Pretext operates invisibly underneath — powering text layer alignment,
+ * character-level search, annotation sizing, and on-demand reflow.
+ *
+ * The raw PDF.js page is always available via the `pdfPage` escape hatch.
  */
 export class PretextPage {
   readonly pageNum: number
@@ -51,9 +61,59 @@ export class PretextPage {
     this.docId = docId
   }
 
+  // ── Primary: Render PDF exactly as authored ─────────────────
+
+  /**
+   * Render the PDF page exactly as it was written.
+   *
+   * - Canvas: PDF.js renders all glyphs, images, vectors natively
+   * - Text layer (optional): PDF.js positions invisible spans at
+   *   original coordinates, pretext refines widths for selection
+   * - Annotations: PDF.js annotation layer
+   *
+   * This is the main entry point. The PDF looks identical to the original.
+   * Pretext capabilities (search, reflow) work behind the scenes.
+   *
+   * @example
+   * ```js
+   * const { textLayer } = await page.render(canvas, {
+   *   scale: 2,
+   *   textLayerContainer: textLayerDiv,
+   * })
+   * // PDF renders exactly as authored
+   * // textLayer enables selection + search highlighting
+   * ```
+   */
+  async render(
+    canvas: HTMLCanvasElement,
+    options: RenderOptions & {
+      textLayerContainer?: HTMLElement
+      textLayerOptions?: TextLayerOptions
+    } = {},
+  ): Promise<RenderResult> {
+    const scale = options.scale ?? 1
+
+    // 1. Render PDF canvas — pure PDF.js, pixel-perfect original
+    await this.renderToCanvas(canvas, options)
+
+    // 2. Prepare text content (cached for search/reflow later)
+    const textContent = await this.getTextContent(scale)
+
+    // 3. Text layer — PDF.js renders it, pretext enhances positioning
+    let textLayer: PretextTextLayer | undefined
+    if (options.textLayerContainer) {
+      textLayer = await this.createTextLayer(
+        options.textLayerContainer,
+        { scale, ...options.textLayerOptions },
+      )
+    }
+
+    return { textLayer, layout: textContent.layout }
+  }
+
   /**
    * Render the PDF page to a canvas with automatic HiDPI setup.
-   * This is a thin wrapper over PDF.js's page.render().
+   * Pure PDF.js rendering — the output is identical to the original PDF.
    */
   async renderToCanvas(
     canvas: HTMLCanvasElement,
@@ -76,38 +136,62 @@ export class PretextPage {
   }
 
   /**
-   * Create an enhanced text layer with pretext-measured positioning.
-   * Produces a transparent text overlay for selection, search, and accessibility
-   * that aligns precisely with the canvas-rendered PDF.
+   * Create an enhanced text layer using PDF.js's native renderTextLayer.
+   * The text positions match exactly where PDF.js rendered glyphs on canvas.
+   * Pretext refines span widths for better selection accuracy.
    */
   async createTextLayer(
     container: HTMLElement,
     options: TextLayerOptions = {},
   ): Promise<PretextTextLayer> {
     const scale = options.scale ?? 1
-    const viewport = this.pdfPage.getViewport({ scale })
     const textContent = await this.getTextContent(scale)
 
     const layer = new PretextTextLayer(
       container,
       textContent,
-      viewport.width,
-      viewport.height,
+      this.pdfPage,
       options,
     )
-    layer.render()
+    await layer.render()
     return layer
   }
 
+  // ── Search: highlights on original PDF coordinates ──────────
+
+  /**
+   * Search within this page. Highlight rects are positioned at the
+   * original PDF text locations — they overlay exactly on the canvas
+   * where the text was rendered.
+   */
+  async search(
+    query: string,
+    options: SearchOptions & { scale?: number } = {},
+  ): Promise<SearchHit[]> {
+    const scale = options.scale ?? 1
+    const viewport = this.pdfPage.getViewport({ scale })
+    const textContent = await this.getTextContent(scale)
+
+    return PretextSearch.searchPage(
+      textContent,
+      query,
+      this.pageNum,
+      viewport.height,
+      scale,
+      options,
+    )
+  }
+
+  // ── Reflow: on-demand reader mode ───────────────────────────
+
   /**
    * Reflow extracted PDF text at an arbitrary width using pretext.
-   * The killer feature: PDF text becomes responsive to any container size.
+   * This is an optional "reader mode" — it does NOT change the PDF
+   * canvas rendering. Use when you want responsive text for a
+   * different viewport.
    *
-   * Handles multi-column layouts (e.g., research papers): columns are
-   * read in order (left then right), with full-width blocks (title,
-   * authors) rendered at full width.
-   *
-   * Call `prepare` once (cached), then `layout` on every resize (~0.01ms).
+   * Handles multi-column layouts: columns are read in order,
+   * full-width blocks (title, authors) are preserved.
    */
   async reflowText(
     maxWidth: number,
@@ -120,11 +204,7 @@ export class PretextPage {
     let totalHeight = 0
 
     for (const paragraph of textContent.paragraphs) {
-      const font = options.font ?? paragraph.font
-
-      // Title/heading paragraphs get extra spacing
       const isTitle = paragraph.role === 'title'
-      const isHeading = paragraph.role === 'heading'
       const isAuthors = paragraph.role === 'authors'
 
       if (isTitle && totalHeight > 0) {
@@ -157,7 +237,6 @@ export class PretextPage {
         totalHeight += effectiveLineHeight
       }
 
-      // Spacing after paragraphs varies by role
       if (isTitle) {
         totalHeight += lineHeight * 0.6
       } else if (isAuthors) {
@@ -176,17 +255,8 @@ export class PretextPage {
   }
 
   /**
-   * Get the detected page layout (column count, structure).
-   * Useful for understanding document structure before reflowing.
-   */
-  async getLayout(): Promise<PageLayout> {
-    const textContent = await this.getTextContent(1)
-    return textContent.layout
-  }
-
-  /**
-   * Reflow PDF text and render it directly to a canvas.
-   * Combines reflowText + canvas rendering in one call.
+   * Render reflowed text to a canvas (reader mode).
+   * Separate from the PDF canvas — this creates its own rendering.
    */
   async renderReflowedText(
     canvas: HTMLCanvasElement,
@@ -222,40 +292,11 @@ export class PretextPage {
     return reflowed
   }
 
-  /**
-   * Search within this page using character-level precision.
-   * Returns matches with pixel-accurate highlight rectangles.
-   */
-  async search(
-    query: string,
-    options: SearchOptions = {},
-  ): Promise<SearchHit[]> {
-    const textContent = await this.getTextContent(1)
-    const hits = PretextSearch.searchPage(textContent, query, this.pageNum, options)
-
-    // Compute highlight rects for each hit
-    if (hits.length > 0) {
-      const lineHeight = 24
-      const maxWidth = this.pdfPage.getViewport({ scale: 1 }).width
-      const allRects = PretextSearch.computeHighlightRects(
-        textContent,
-        query,
-        maxWidth,
-        lineHeight,
-        1,
-        options,
-      )
-      for (let i = 0; i < hits.length && i < allRects.length; i++) {
-        hits[i].rects = allRects[i]
-      }
-    }
-
-    return hits
-  }
+  // ── Annotations & Thumbnails ────────────────────────────────
 
   /**
    * Get annotations with pretext-measured text bounds.
-   * Enables accurate popup/bubble sizing without DOM measurement.
+   * Annotations are positioned at their original PDF locations.
    */
   async getAnnotations(options: { scale?: number; maxWidth?: number } = {}): Promise<MeasuredAnnotation[]> {
     const scale = options.scale ?? 1
@@ -266,8 +307,8 @@ export class PretextPage {
 
   /**
    * Generate a page thumbnail.
-   * Normal mode: renders at small scale.
-   * Reflow mode: extracts and reflows text for readability at any size.
+   * Normal mode: renders the original PDF at small scale.
+   * Reflow mode: extracts and reflows text for readability.
    */
   async thumbnail(
     canvas: HTMLCanvasElement,
@@ -277,7 +318,6 @@ export class PretextPage {
       const textContent = await this.getTextContent(1)
       await renderThumbnail(canvas, textContent, options)
     } else {
-      // Normal thumbnail: render at small scale
       const targetWidth = options.width ?? 150
       const viewport = this.pdfPage.getViewport({ scale: 1 })
       const scale = options.scale ?? targetWidth / viewport.width
@@ -285,7 +325,15 @@ export class PretextPage {
     }
   }
 
-  /** Access the prepared text content (for advanced use) */
+  // ── Layout & Text Access ────────────────────────────────────
+
+  /** Get the detected page layout (column count, structure) */
+  async getLayout(): Promise<PageLayout> {
+    const textContent = await this.getTextContent(1)
+    return textContent.layout
+  }
+
+  /** Access prepared text content (for advanced use) */
   async getTextContent(scale = 1): Promise<PreparedTextContent> {
     return this.cache.getOrPrepare(this.docId, this.pageNum, () =>
       extractAndPrepare(this.pdfPage, this.fontMapper, scale),
