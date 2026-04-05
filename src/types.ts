@@ -173,6 +173,22 @@ export interface Paragraph {
   /** Position in page coordinates */
   x: number
   y: number
+  /** Which column this paragraph belongs to (0-based) */
+  column: number
+  /** Semantic role hint */
+  role?: 'title' | 'authors' | 'abstract' | 'heading' | 'body' | 'footnote'
+}
+
+/** Detected page layout structure */
+export interface PageLayout {
+  /** Number of text columns detected */
+  columnCount: number
+  /** X boundaries of each column [{ left, right }, ...] */
+  columns: Array<{ left: number; right: number }>
+  /** Page width */
+  pageWidth: number
+  /** Whether an author/affiliation block was detected */
+  hasAuthorBlock: boolean
 }
 
 export interface PreparedTextContent {
@@ -182,6 +198,8 @@ export interface PreparedTextContent {
   fontMap: Map<string, string>
   fullText: string
   fullPrepared: any
+  /** Detected page layout (columns, author blocks, etc.) */
+  layout: PageLayout
 }
 
 // ── Events ────────────────────────────────────────────────────

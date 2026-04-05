@@ -41,6 +41,7 @@ export type {
   CacheStats,
   PretextPDFEvent,
   PreparedTextContent,
+  PageLayout,
   Paragraph,
   TextItem,
   TextStyle,

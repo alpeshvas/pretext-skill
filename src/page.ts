@@ -2,6 +2,7 @@ import { layoutWithLines } from '@chenglou/pretext'
 import type { PDFPageProxy } from 'pdfjs-dist/types/src/display/api'
 import type {
   MeasuredAnnotation,
+  PageLayout,
   PreparedTextContent,
   ReflowedLine,
   ReflowedText,
@@ -102,6 +103,10 @@ export class PretextPage {
    * Reflow extracted PDF text at an arbitrary width using pretext.
    * The killer feature: PDF text becomes responsive to any container size.
    *
+   * Handles multi-column layouts (e.g., research papers): columns are
+   * read in order (left then right), with full-width blocks (title,
+   * authors) rendered at full width.
+   *
    * Call `prepare` once (cached), then `layout` on every resize (~0.01ms).
    */
   async reflowText(
@@ -116,10 +121,26 @@ export class PretextPage {
 
     for (const paragraph of textContent.paragraphs) {
       const font = options.font ?? paragraph.font
+
+      // Title/heading paragraphs get extra spacing
+      const isTitle = paragraph.role === 'title'
+      const isHeading = paragraph.role === 'heading'
+      const isAuthors = paragraph.role === 'authors'
+
+      if (isTitle && totalHeight > 0) {
+        totalHeight += lineHeight * 0.5
+      }
+
+      const effectiveLineHeight = isTitle
+        ? lineHeight * 1.3
+        : isAuthors
+          ? lineHeight * 0.9
+          : lineHeight
+
       const { lines: pLines } = layoutWithLines(
         paragraph.prepared,
         maxWidth,
-        lineHeight,
+        effectiveLineHeight,
       )
 
       for (const pLine of pLines) {
@@ -133,11 +154,17 @@ export class PretextPage {
             charEnd: textContent.items[idx]?.str.length ?? 0,
           })),
         })
-        totalHeight += lineHeight
+        totalHeight += effectiveLineHeight
       }
 
-      // Small gap between paragraphs
-      totalHeight += lineHeight * 0.3
+      // Spacing after paragraphs varies by role
+      if (isTitle) {
+        totalHeight += lineHeight * 0.6
+      } else if (isAuthors) {
+        totalHeight += lineHeight * 0.4
+      } else {
+        totalHeight += lineHeight * 0.3
+      }
     }
 
     return {
@@ -146,6 +173,15 @@ export class PretextPage {
       lineCount: lines.length,
       sourcePageNum: this.pageNum,
     }
+  }
+
+  /**
+   * Get the detected page layout (column count, structure).
+   * Useful for understanding document structure before reflowing.
+   */
+  async getLayout(): Promise<PageLayout> {
+    const textContent = await this.getTextContent(1)
+    return textContent.layout
   }
 
   /**
